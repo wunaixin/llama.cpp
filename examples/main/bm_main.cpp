@@ -12,29 +12,16 @@
 #include <sstream>
 #include <string>
 #include <vector>
-
-#if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
 #include <signal.h>
 #include <unistd.h>
-#elif defined (_WIN32)
-#define WIN32_LEAN_AND_MEAN
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#include <signal.h>
-#endif
 
-#if defined(_MSC_VER)
-#pragma warning(disable: 4244 4267) // possible loss of data
-#endif
 
-static llama_context           ** g_ctx;
-static llama_model             ** g_model;
-static gpt_params               * g_params;
-static std::vector<llama_token> * g_input_tokens;
-static std::ostringstream       * g_output_ss;
-static std::vector<llama_token> * g_output_tokens;
+static llama_context           **g_ctx;
+static llama_model             **g_model;
+static gpt_params               *g_params;
+static std::vector<llama_token> *g_input_tokens;
+static std::ostringstream       *g_output_ss;
+static std::vector<llama_token> *g_output_tokens;
 static bool is_interacting = false;
 
 static bool file_exists(const std::string &path) {
@@ -87,7 +74,6 @@ static void write_logfile(
     fclose(logfile);
 }
 
-#if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__)) || defined (_WIN32)
 static void sigint_handler(int signo) {
     if (signo == SIGINT) {
         if (!is_interacting) {
@@ -101,13 +87,13 @@ static void sigint_handler(int signo) {
         }
     }
 }
-#endif
 
-static void llama_log_callback_logTee(ggml_log_level level, const char * text, void * user_data) {
+static void llama_log_callback_logTee(ggml_log_level level, const char *text, void *user_data) {
     (void) level;
     (void) user_data;
     LOG_TEE("%s", text);
 }
+
 
 
 int main(int argc, char ** argv) {
@@ -125,40 +111,10 @@ int main(int argc, char ** argv) {
     llama_log_set(llama_log_callback_logTee, nullptr);
 #endif
 
-    // TODO: Dump params ?
-    //LOG("Params perplexity: %s\n", LOG_TOSTR(params.perplexity));
-
     // save choice to use color for later
     // (note for later: this is a slightly awkward choice)
     console::init(params.simple_io, params.use_color);
     atexit([]() { console::cleanup(); });
-
-    if (params.logits_all) {
-        printf("\n************\n");
-        printf("%s: please use the 'perplexity' tool for perplexity calculations\n", __func__);
-        printf("************\n\n");
-        return 0;
-    }
-
-    if (params.embedding) {
-        printf("\n************\n");
-        printf("%s: please use the 'embedding' tool for embedding calculations\n", __func__);
-        printf("************\n\n");
-        return 0;
-    }
-
-    if (params.n_ctx != 0 && params.n_ctx < 8) {
-        LOG_TEE("%s: warning: minimum context size is 8, using minimum size.\n", __func__);
-        params.n_ctx = 8;
-    }
-
-    if (params.rope_freq_base != 0.0) {
-        LOG_TEE("%s: warning: changing RoPE frequency base to %g.\n", __func__, params.rope_freq_base);
-    }
-
-    if (params.rope_freq_scale != 0.0) {
-        LOG_TEE("%s: warning: scaling RoPE frequency by %g.\n", __func__, params.rope_freq_scale);
-    }
 
     LOG_TEE("%s: build = %d (%s)\n",      __func__, LLAMA_BUILD_NUMBER, LLAMA_COMMIT);
     LOG_TEE("%s: built with %s for %s\n", __func__, LLAMA_COMPILER, LLAMA_BUILD_TARGET);
@@ -176,14 +132,12 @@ int main(int argc, char ** argv) {
 
     LOG("%s: llama backend init\n", __func__);
     llama_backend_init(params.numa);
-
     llama_model* model;
     llama_context* ctx;
     llama_context* ctx_guidance = NULL;
     g_model = &model;
     g_ctx = &ctx;
 
-    // load the model and apply lora adapter, if any
     LOG("%s: load the model and apply lora adapter, if any\n", __func__);
     std::tie(model, ctx) = llama_init_from_gpt_params(params);
 
@@ -384,18 +338,11 @@ int main(int argc, char ** argv) {
     }
 
     if (params.interactive) {
-#if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
         struct sigaction sigint_action;
         sigint_action.sa_handler = sigint_handler;
         sigemptyset (&sigint_action.sa_mask);
         sigint_action.sa_flags = 0;
         sigaction(SIGINT, &sigint_action, NULL);
-#elif defined (_WIN32)
-        auto console_ctrl_handler = +[](DWORD ctrl_type) -> BOOL {
-            return (ctrl_type == CTRL_C_EVENT) ? (sigint_handler(SIGINT), true) : false;
-        };
-        SetConsoleCtrlHandler(reinterpret_cast<PHANDLER_ROUTINE>(console_ctrl_handler), true);
-#endif
 
         LOG_TEE("%s: interactive mode on.\n", __func__);
 

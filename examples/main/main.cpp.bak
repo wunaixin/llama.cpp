@@ -1,6 +1,8 @@
 #include "common.h"
+
 #include "console.h"
 #include "llama.h"
+
 #include <cassert>
 #include <cinttypes>
 #include <cmath>
@@ -50,26 +52,31 @@ static bool file_is_empty(const std::string &path) {
 }
 
 static void write_logfile(
-    const llama_context *ctx, const gpt_params &params, const llama_model *model,
-    const std::vector<llama_token> &input_tokens, const std::string &output,
-    const std::vector<llama_token> &output_tokens
+    const llama_context * ctx, const gpt_params & params, const llama_model * model,
+    const std::vector<llama_token> & input_tokens, const std::string & output,
+    const std::vector<llama_token> & output_tokens
 ) {
     if (params.logdir.empty()) {
         return;
     }
+
     const std::string timestamp = get_sortable_timestamp();
+
     const bool success = create_directory_with_parents(params.logdir);
     if (!success) {
         fprintf(stderr, "%s: warning: failed to create logdir %s, cannot write logfile\n",
                 __func__, params.logdir.c_str());
         return;
     }
+
     const std::string logfile_path = params.logdir + timestamp + ".yml";
     FILE * logfile = fopen(logfile_path.c_str(), "w");
+
     if (logfile == NULL) {
         fprintf(stderr, "%s: failed to open logfile %s\n", __func__, logfile_path.c_str());
         return;
     }
+
     fprintf(logfile, "binary: main\n");
     char model_desc[128];
     llama_model_desc(model, model_desc, sizeof(model_desc));
@@ -83,6 +90,7 @@ static void write_logfile(
 
     dump_string_yaml_multiline(logfile, "output", output.c_str());
     dump_vector_int_yaml(logfile, "output_tokens", output_tokens);
+
     llama_dump_timing_info_yaml(logfile, ctx);
     fclose(logfile);
 }
@@ -90,7 +98,7 @@ static void write_logfile(
 #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__)) || defined (_WIN32)
 static void sigint_handler(int signo) {
     if (signo == SIGINT) {
-        if (!is_interacting) {
+        if (!is_interacting && g_params->interactive) {
             is_interacting = true;
         } else {
             console::cleanup();
@@ -109,21 +117,21 @@ static void llama_log_callback_logTee(ggml_log_level level, const char * text, v
     LOG_TEE("%s", text);
 }
 
-
 int main(int argc, char ** argv) {
     gpt_params params;
     g_params = &params;
+
     if (!gpt_params_parse(argc, argv, params)) {
         return 1;
     }
-    llama_sampling_params &sparams = params.sparams;
+    llama_sampling_params & sparams = params.sparams;
 
 #ifndef LOG_DISABLE_LOGS
     log_set_target(log_filename_generator("main", "log"));
     LOG_TEE("Log start\n");
     log_dump_cmdline(argc, argv);
     llama_log_set(llama_log_callback_logTee, nullptr);
-#endif
+#endif // LOG_DISABLE_LOGS
 
     // TODO: Dump params ?
     //LOG("Params perplexity: %s\n", LOG_TOSTR(params.perplexity));
@@ -137,6 +145,7 @@ int main(int argc, char ** argv) {
         printf("\n************\n");
         printf("%s: please use the 'perplexity' tool for perplexity calculations\n", __func__);
         printf("************\n\n");
+
         return 0;
     }
 
@@ -144,6 +153,7 @@ int main(int argc, char ** argv) {
         printf("\n************\n");
         printf("%s: please use the 'embedding' tool for embedding calculations\n", __func__);
         printf("************\n\n");
+
         return 0;
     }
 
@@ -177,16 +187,15 @@ int main(int argc, char ** argv) {
     LOG("%s: llama backend init\n", __func__);
     llama_backend_init(params.numa);
 
-    llama_model* model;
-    llama_context* ctx;
-    llama_context* ctx_guidance = NULL;
+    llama_model * model;
+    llama_context * ctx;
+    llama_context * ctx_guidance = NULL;
     g_model = &model;
     g_ctx = &ctx;
 
     // load the model and apply lora adapter, if any
     LOG("%s: load the model and apply lora adapter, if any\n", __func__);
     std::tie(model, ctx) = llama_init_from_gpt_params(params);
-
     if (sparams.cfg_scale > 1.f) {
         struct llama_context_params lparams = llama_context_params_from_gpt_params(params);
         ctx_guidance = llama_new_context_with_model(model, lparams);
@@ -383,7 +392,8 @@ int main(int argc, char ** argv) {
         LOG_TEE("\n");
     }
 
-    if (params.interactive) {
+    // ctrl+C handling
+    {
 #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
         struct sigaction sigint_action;
         sigint_action.sa_handler = sigint_handler;
@@ -396,7 +406,9 @@ int main(int argc, char ** argv) {
         };
         SetConsoleCtrlHandler(reinterpret_cast<PHANDLER_ROUTINE>(console_ctrl_handler), true);
 #endif
+    }
 
+    if (params.interactive) {
         LOG_TEE("%s: interactive mode on.\n", __func__);
 
         if (!params.antiprompt.empty()) {
@@ -435,7 +447,6 @@ int main(int argc, char ** argv) {
             }
         }
     }
-
     LOG_TEE("sampling: \n%s\n", llama_sampling_print(sparams).c_str());
     LOG_TEE("sampling order: \n%s\n", llama_sampling_order_print(sparams).c_str());
     LOG_TEE("generate: n_ctx = %d, n_batch = %d, n_predict = %d, n_keep = %d\n", n_ctx, params.n_batch, params.n_predict, params.n_keep);
@@ -915,7 +926,7 @@ int main(int argc, char ** argv) {
 
 #ifndef LOG_DISABLE_LOGS
     LOG_TEE("Log end\n");
-#endif
+#endif // LOG_DISABLE_LOGS
 
     return 0;
 }

@@ -61,6 +61,7 @@ extern "C" {
     enum llama_vocab_type {
         LLAMA_VOCAB_TYPE_SPM = 0, // SentencePiece
         LLAMA_VOCAB_TYPE_BPE = 1, // Byte Pair Encoding
+        LLAMA_VOCAB_TYPE_WPM = 2, // WordPiece
     };
 
     enum llama_token_type {
@@ -235,6 +236,7 @@ extern "C" {
         bool logits_all;  // the llama_eval() call computes all logits, not just the last one (DEPRECATED - set llama_batch.logits instead)
         bool embedding;   // embedding mode only
         bool offload_kqv; // whether to offload the KQV ops (including the KV cache) to GPU
+        bool do_pooling;  // whether to pool (sum) embedding results by sequence id (ignored if no pooling layer)
     };
 
     // model quantization parameters
@@ -627,6 +629,10 @@ extern "C" {
     // shape: [n_embd] (1-dimensional)
     LLAMA_API float * llama_get_embeddings(struct llama_context * ctx);
 
+    // Get the embeddings for the ith sequence
+    // llama_get_embeddings(ctx) + i*n_embd
+    LLAMA_API float * llama_get_embeddings_ith(struct llama_context * ctx, int32_t i);
+
     //
     // Vocab
     //
@@ -844,7 +850,8 @@ extern "C" {
     //
 
     struct llama_beam_view {
-        const llama_token *tokens;
+        const llama_token * tokens;
+
         size_t n_tokens;
         float  p;        // Cumulative beam probability (renormalized relative to all beams)
         bool   eob;      // Callback should set this to true when a beam is at end-of-beam.
@@ -855,10 +862,11 @@ extern "C" {
     // (e.g. beams[0]) as they will be removed (shifted) from all beams in all subsequent callbacks.
     // These pointers are valid only during the synchronous callback, so should not be saved.
     struct llama_beams_state {
-        struct llama_beam_view *beam_views;
+        struct llama_beam_view * beam_views;
+
         size_t n_beams;               // Number of elements in beam_views[].
         size_t common_prefix_length;  // Current max length of prefix tokens shared by all beams.
-        bool   last_call;             // True if this is the last callback invocation.
+        bool   last_call;             // True iff this is the last callback invocation.
     };
 
     // Type of pointer to the beam_search_callback function.

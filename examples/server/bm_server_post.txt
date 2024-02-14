@@ -1,0 +1,143 @@
+
+
+
+int main(int argc, char **argv) {
+    llama_server_context llama;
+
+    svr.Post("/completion", [&llama, &validate_api_key](const httplib::Request &req, httplib::Response &res)
+    {
+        json data = json::parse(req.body);
+        llama.queue_results.add_waiting_task_id(task_id);
+        llama.request_completion(task_id, data, false, false, -1);
+        task_result result = llama.queue_results.recv(task_id);
+        res.set_content(result.result_json.dump(-1, ' ', false, json::error_handler_t::replace), "application/json; charset=utf-8");
+    }
+
+    llama.queue_tasks.on_all_tasks_finished(std::bind(&llama_server_context::run_on_all_tasks_finished, &llama));
+
+}
+
+struct llama_server_context {
+    std::vector<llama_client_slot> slots;
+    llama_server_queue queue_tasks;
+    llama_server_response queue_results;
+
+    void request_completion(int task_id, json data, bool infill, bool embedding, int multitask_id) {
+        task_server task;
+        if (numbers) {
+            queue_tasks.post(task);   // 把任务加入队列
+        } else {
+            split_multiprompt_task(task_id, task);
+        }
+    }
+
+    void send_final_response(llama_client_slot &slot) {
+        task_result res;
+        res.result_json = json
+        {
+            {"content",             !slot.params.stream ? slot.generated_text : ""},
+            {"slot_id",             slot.id},
+            {"stop",                true},
+            {"model",               params.model_alias},
+            ...
+        };        // 终端打印出的内容
+        queue_results.send(res);
+    }
+
+    bool process_token(completion_token_output &result, llama_client_slot &slot) {
+        const std::string token_str = llama_token_to_piece(ctx, result.tok);
+        slot.generated_text += token_str;
+        return slot.has_next_token;
+    }
+
+    bool update_slots() {
+        for (int32_t i = 0; i < (int32_t) batch.n_tokens; i += n_batch) {
+            for (auto &slot : slots) {
+                completion_token_output result;
+                if (!process_token(result, slot)) {
+                    send_final_response(slot);
+                }
+            }
+        }
+    }
+
+    void run_on_all_tasks_finished() {
+        update_slots();
+    }
+}
+
+struct llama_client_slot {
+    std::string generated_text;
+}
+
+
+
+struct llama_server_queue {
+    std::mutex mutex_tasks;
+    std::vector<task_server> queue_tasks;
+    std::condition_variable condition_tasks;
+    std::function<void(void)> callback_all_task_finished;
+
+    int post(task_server task) {     // Add a new task to the end of the queue
+        std::unique_lock<std::mutex> lock(mutex_tasks);
+        queue_tasks.push_back(std::move(task));
+        condition_tasks.notify_one();
+        return task.id;
+    }
+
+    // Register the function to be called when the batch of tasks is finished
+    void on_all_tasks_finished(std::function<void(void)> callback) {
+        callback_all_task_finished = callback;
+    }
+}
+
+struct llama_server_response {
+    std::set<int> waiting_task_ids;
+    std::vector<task_result> queue_results;
+    std::condition_variable condition_results;
+
+    void add_waiting_task_id(int task_id) {
+        std::unique_lock<std::mutex> lock(mutex_results);
+        waiting_task_ids.insert(task_id);
+    }
+
+    task_result recv(int task_id) {
+        while (true) {
+            std::unique_lock<std::mutex> lock(mutex_results);
+            condition_results.wait(lock, [&]{ return !queue_results.empty(); });
+            for (int i = 0; i < (int) queue_results.size(); i++) {
+                if (queue_results[i].id == task_id) {
+                    assert(queue_results[i].multitask_id == -1);
+                    task_result res = queue_results[i];
+                    queue_results.erase(queue_results.begin() + i);
+                    return res;
+                }
+            }
+        }
+    }
+}
+
+struct task_result {
+    int id;
+    int multitask_id = -1;
+    json result_json;
+};
+
+struct task_server {
+    int id = -1; // to be filled by llama_server_queue
+    json data;
+};
+
+
+
+inline void Response::set_content(const std::string &s, const std::string &content_type) {   // httplib.h
+  set_content(s.data(), s.size(), content_type);
+}
+inline void Response::set_content(const char *s, size_t n, const std::string &content_type) {
+  body.assign(s, n);
+  set_header("Content-Type", content_type);
+}
+struct Response {
+  std::string body;
+}
+

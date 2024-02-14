@@ -1,0 +1,106 @@
+
+
+
+
+(1)
+static void process_logits(        // 实际用的这个
+    int n_vocab, const float *logits, const int *tokens, int n_token, 
+    std::vector<std::thread> &workers,
+    double &nll, double &nll2, float *logit_history, float *prob_history)
+
+(2)
+static void process_logits(
+    std::ostream& out, 
+    int n_vocab, const float *logits, const int * tokens, int n_token,
+    std::vector<std::thread> &workers, std::vector<uint16_t> &log_probs, 
+    double &nll, double &nll2)
+
+(3)
+static void process_logits(
+    int n_vocab, const float *logits, const int *tokens, int n_token,
+    std::vector<std::thread> &workers, 
+    const std::vector<uint16_t> &base_log_probs, kl_divergence_result &kld, float * kld_values) 
+
+
+static results_perplexity perplexity(llama_context *ctx, const gpt_params &params) {
+    const int n_ctx = llama_n_ctx(ctx);    // eg: 512
+    std::vector<llama_token> tokens = ::llama_tokenize(ctx, params.prompt, add_bos);
+    std::vector<float> logit_history;
+    std::vector<float> prob_history;
+    const int n_chunk_max = tokens.size() / n_ctx;
+    const int n_chunk = params.n_chunks < 0 ? n_chunk_max : std::min(params.n_chunks, n_chunk_max);
+    const int n_vocab = llama_n_vocab(llama_get_model(ctx));
+    int count = 0;
+    double nll = 0.0;
+    double nll2 = 0.0;
+    std::vector<std::thread> workers(std::thread::hardware_concurrency() - 1);
+    for (int i = 0; i < n_chunk; ++i) {
+        const int start = i * n_ctx;
+        const int first = n_ctx / 2;
+        const float *all_logits = num_batches > 1 ? logits.data() : llama_get_logits(ctx);
+        process_logits(n_vocab, all_logits + first*n_vocab, tokens.data() + start + first, n_ctx - 1 - first,
+                workers, nll, nll2, logit_history.data() + start + first, prob_history.data() + start + first);
+        count += n_ctx - first - 1;
+    }
+    nll2 /= count;
+    nll /= count;                 // 代表 Average Negative Log Likelihood
+    const double ppl = exp(nll);
+    nll2 -= nll * nll;
+    if (nll2 > 0) {
+        nll2 = sqrt(nll2/(count-1));
+        printf("Final estimate: PPL = %.4lf +/- %.5lf\n", ppl, nll2*ppl);
+    } else {
+        printf("Unexpected negative standard deviation of log(prob)\n");
+    }
+    return {tokens, ppl, logit_history, prob_history};
+}
+
+static void process_logits(    // 实际用的这个, 对 logits 的处理结果最终保存到了 logit_history 和 prob_history 当中
+        int n_vocab, const float *logits, const int *tokens, int n_token, 
+        std::vector<std::thread> &workers,
+        double &nll, double &nll2, float *logit_history, float *prob_history) {
+    std::mutex mutex;
+    int counter = 0;
+    auto compute = [&mutex, &counter, &nll, &nll2, logit_history, prob_history, n_vocab, logits, tokens, n_token]() {
+        double local_nll  = 0;
+        double local_nll2 = 0;
+        while (true) {
+            std::unique_lock<std::mutex> lock(mutex);
+            int i = counter++;
+            if (i >= n_token) {
+                nll += local_nll; 
+                nll2 += local_nll2;
+                break;
+            }
+            lock.unlock();
+            const results_log_softmax results = log_softmax(n_vocab, logits + i*n_vocab, tokens[i+1]);
+            const double v = -results.log_softmax;
+            local_nll += v;
+            local_nll2 += v*v;
+            logit_history[i] = results.logit;    // 处理结果保存
+            prob_history[i]  = results.prob;     // 处理结果保存
+        }
+    };
+    for (auto &w : workers) {
+        w = std::thread(compute);
+    }
+    compute();
+    for (auto &w : workers) {
+        w.join();
+    }
+}
+
+
+int main(int argc, char ** argv) {
+    gpt_params params;
+    gpt_params_parse(argc, argv, params);
+    llama_context *ctx;
+    std::tie(model, ctx) = llama_init_from_gpt_params(params);
+
+    struct results_perplexity results;
+    results = perplexity(ctx, params);
+}
+
+
+
+

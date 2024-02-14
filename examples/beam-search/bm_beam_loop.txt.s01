@@ -1,0 +1,291 @@
+
+
+
+int main(int argc, char ** argv) {
+    llama_beam_search(ctx, beam_search_callback, &callback_data, beam_width, n_past, n_predict);
+    for (llama_token const token_id : callback_data.response) {
+        std::cout << llama_token_to_piece(ctx, token_id);  // 打印生成的文本
+    }
+}
+
+void llama_beam_search(*ctx, callback, *callback_data, ...) {
+    llama_beam_search_data beam_search_data(ctx, n_beams, n_past, n_predict);
+    beam_search_data.loop(callback, callback_data);
+}
+
+struct llama_beam_search_data {
+    llama_context *ctx;
+    size_t n_beams;
+    int n_past;
+    int n_predict;
+
+    std::vector<llama_beam> beams;
+    std::vector<llama_beam> next_beams;   //会被用作 min-heap
+    std::vector<llama_beam_view> beam_views;
+    size_t common_prefix_length;
+
+    void loop(callback, callback_data) {
+        for (int i = 0 ; i < n_predict; ++i) {
+            callback(callback_data, get_beams_state(false));
+            update_beams_from_beam_views();
+            llama_decode(ctx, llama_batch_get_one(beams[0].tokens.data(), common_prefix_length, n_past, 0));
+            n_past += common_prefix_length;
+            for (llama_beam & beam : beams) {
+                beam.shift_tokens(common_prefix_length);
+                fill_next_beams_by_top_probabilities(beam);
+            }
+        }
+        collapse_beams(top_beam_index());
+        callback(callback_data, get_beams_state(true));  //调用 beam_search_callback
+    }
+
+    void fill_next_beams_by_top_probabilities(llama_beam & beam) {  //操作 min-heap
+
+    }
+}
+
+void beam_search_callback(void *callback_data_ptr, llama_beams_state beams_state) {
+    printf(",");  // Show progress
+}
+struct llama_beams_state {
+    struct llama_beam_view *beam_views;
+    size_t n_beams;
+    size_t common_prefix_length;
+    bool   last_call;
+};
+
+
+int32_t llama_decode(struct llama_context *ctx, struct llama_batch batch) {
+    const int ret = llama_decode_internal(*ctx, batch);
+    return ret;
+}
+
+int llama_decode_internal(llama_context &lctx, llama_batch batch) {
+    const auto &model   = lctx.model;
+    const auto &hparams = model.hparams;
+    const auto &cparams = lctx.cparams;
+    const auto n_batch = cparams.n_batch;
+    const uint32_t n_tokens = batch.n_tokens;
+    const int64_t n_embd  = hparams.n_embd;
+    const int64_t n_vocab = hparams.n_vocab;
+
+    auto &kv_self = lctx.kv_self;
+    if (!llama_kv_cache_find_slot(kv_self, batch)) {
+        return 1;
+    }
+    kv_self.n = std::min((int32_t) cparams.n_ctx, std::max(32, GGML_PAD(llama_kv_cache_cell_max(kv_self), 32)));
+    printf("kv_self.n = %5d, kv_self.used = %5d, kv_self.head = %5d\n", kv_self.n, kv_self.used, kv_self.head);
+
+    ggml_cgraph *gf = llama_build_graph(lctx, batch);
+    struct ggml_tensor *res = gf->nodes[gf->n_nodes - 1];         //最后的 output 层
+    struct ggml_tensor *embeddings = gf->nodes[gf->n_nodes - 2];  //输出 embedding 层(token_id to word)
+    
+    ggml_backend_sched_graph_compute(lctx.sched, gf);   // 貌似就是 forward
+
+    auto &logits_out = lctx.logits;
+    ggml_backend_t res_backend = ggml_backend_sched_get_node_backend(lctx.sched, res);
+
+    for (uint32_t i = 0; i < n_tokens; i++) {
+        ggml_backend_tensor_get_async(res_backend, res, logits_out.data() + (n_vocab*i), (n_vocab*i)*sizeof(float), n_vocab*sizeof(float));
+    }
+    return 0;
+}
+
+void ggml_backend_sched_graph_compute(ggml_backend_sched_t sched, struct ggml_cgraph * graph) {
+    sched_split_graph(sched, graph);
+    sched_alloc_splits(sched);
+    sched_compute_splits(sched);
+}
+
+static void sched_compute_splits(ggml_backend_sched_t sched) {
+    struct ggml_backend_sched_split *splits = sched->splits;
+    for (int i = 0; i < sched->n_splits; i++) {
+        struct ggml_backend_sched_split *split = &splits[i];
+        ggml_backend_t split_backend = get_allocr_backend(sched, split->tallocr);
+        ggml_backend_graph_compute(split_backend, &split->graph);
+    }
+}
+
+bool ggml_backend_graph_compute(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
+    return backend->iface.graph_compute(backend, cgraph);
+}
+
+static struct ggml_backend_i cpu_backend_i = {
+    ...
+    /* .graph_compute           = */ ggml_backend_cpu_graph_compute,
+};
+GGML_CALL static bool ggml_backend_cpu_graph_compute(ggml_backend_t backend, struct ggml_cgraph *cgraph) {
+    struct ggml_backend_cpu_context *cpu_ctx = (struct ggml_backend_cpu_context *)backend->context;
+    struct ggml_cplan cplan = ggml_graph_plan(cgraph, cpu_ctx->n_threads);
+    cplan.work_data = cpu_ctx->work_data;
+    ggml_graph_compute(cgraph, &cplan);
+    return true;
+}
+
+int ggml_graph_compute(struct ggml_cgraph *cgraph, struct ggml_cplan *cplan) {
+    const int n_threads = cplan->n_threads;
+    struct ggml_compute_state_shared state_shared = {
+        /*.cgraph                  =*/ cgraph,
+        /*.cgraph_plan             =*/ cplan,
+        /*.perf_node_start_cycles  =*/ 0,
+        /*.perf_node_start_time_us =*/ 0,
+        /*.n_threads               =*/ n_threads,
+        /*.n_active                =*/ n_threads,
+        /*.node_n                  =*/ -1,
+        /*.node_task               =*/ GGML_TASK_FINALIZE,
+        /*.abort_callback          =*/ NULL,
+        /*.abort_callback_data     =*/ NULL,
+    };
+    struct ggml_compute_state *workers = alloca(sizeof(struct ggml_compute_state)*n_threads);
+
+    // create thread pool (创建线程池)
+    if (n_threads > 1) {
+        for (int j = 1; j < n_threads; ++j) {   # 从线程1开始
+            workers[j] = (struct ggml_compute_state) {
+                .thrd   = 0,
+                .ith = j,
+                .shared = &state_shared,
+            };
+            const int rc = ggml_thread_create(&workers[j].thrd, NULL, ggml_graph_compute_thread, &workers[j]);
+            GGML_ASSERT(rc == 0);
+            UNUSED(rc);
+        }
+    }
+
+    workers[0].ith = 0;
+    workers[0].shared = &state_shared;
+    int compute_status = (size_t) ggml_graph_compute_thread(&workers[0]);  // 线程0
+    clear_numa_thread_affinity();
+
+    // join or kill thread pool  (加入线程池)
+    if (n_threads > 1) {
+        for (int j = 1; j < n_threads; j++) {
+            const int rc = ggml_thread_join(workers[j].thrd, NULL);
+            GGML_ASSERT(rc == 0);
+        }
+    }
+
+    return compute_status;
+}
+
+static thread_ret_t ggml_graph_compute_thread(void * data) {
+    struct ggml_compute_state *state = (struct ggml_compute_state *) data;
+    const struct ggml_cgraph *cgraph = state->shared->cgraph;
+    const struct ggml_cplan  *cplan  = state->shared->cplan;
+    const int   n_threads   = state->shared->n_threads;
+    set_numa_thread_affinity(state->ith, n_threads);
+    int node_n = -1;
+    int task_phase = GGML_TASK_FINALIZE;
+    while (true) {
+        ...
+        /* INIT & COMPUTE */
+        struct ggml_tensor *node = cgraph->nodes[node_n];
+        const int n_tasks = ggml_get_n_tasks(node, n_threads);
+        struct ggml_compute_params params = {
+            /*.type  =*/ GGML_TASK_INIT,
+            /*.ith   =*/ state->ith,
+            /*.nth   =*/ n_tasks,
+            /*.wsize =*/ cplan->work_size,
+            /*.wdata =*/ cplan->work_data,
+        };
+        if (state->ith < n_tasks) {
+            params.type = GGML_TASK_COMPUTE;
+            ggml_compute_forward(&params, node);    // 真正的 forward
+        }
+        if (atomic_fetch_sub(&state->shared->n_active, 1) == 1) {
+            task_phase = GGML_TASK_FINALIZE;
+            atomic_store(&state->shared->n_active,  n_threads);
+            atomic_store(&state->shared->node_task, task_phase);
+        } else {
+            ggml_graph_compute_thread_sync_task(&task_phase, state, false);
+        }
+    }
+    return GGML_EXIT_SUCCESS;
+}
+
+static void ggml_compute_forward(struct ggml_compute_params *params, struct ggml_tensor *tensor) {
+    switch (tensor->op) {     // 很多的算子(op)可选
+        case GGML_OP_ADD:
+            ggml_compute_forward_add(params, tensor->src[0], tensor->src[1], tensor);
+            break;
+        case GGML_OP_SUB:
+            ggml_compute_forward_sub(params, tensor->src[0], tensor->src[1], tensor);
+            break;
+        case GGML_OP_MUL:
+            ggml_compute_forward_mul(params, tensor->src[0], tensor->src[1], tensor);
+            break;
+        case GGML_OP_DIV:
+            ggml_compute_forward_div(params, tensor->src[0], tensor->src[1], tensor);
+            break;
+        case GGML_OP_CONCAT:
+            ggml_compute_forward_concat(params, tensor->src[0], tensor->src[1], tensor);
+            break;
+        case GGML_OP_RESHAPE:
+            ggml_compute_forward_reshape(params, tensor->src[0], tensor);
+            break;
+        case GGML_OP_PERMUTE:
+            ggml_compute_forward_permute(params, tensor->src[0]);
+            break;
+        case GGML_OP_TRANSPOSE:
+            ggml_compute_forward_transpose(params, tensor->src[0]);
+            break;
+        case GGML_OP_SOFT_MAX:
+            ggml_compute_forward_soft_max(params, tensor->src[0], tensor->src[1], tensor);
+            break;
+        case GGML_OP_ROPE:
+            ggml_compute_forward_rope(params, tensor->src[0], tensor->src[1], tensor);
+            break;
+        case GGML_OP_ALIBI:
+            ggml_compute_forward_alibi(params, tensor->src[0], tensor);
+            break;
+        case GGML_OP_CROSS_ENTROPY_LOSS:
+            ggml_compute_forward_cross_entropy_loss(params, tensor->src[0], tensor->src[1], tensor);
+            break;
+        case GGML_OP_CROSS_ENTROPY_LOSS_BACK:
+            ggml_compute_forward_cross_entropy_loss_back(params, tensor->src[0], tensor->src[1], tensor->src[2], tensor);
+            break;
+        ...
+    }
+}
+
+static void ggml_compute_forward_add(*params, *src0, *src1, *dst) {    // ggml.c
+    switch (src0->type) {
+        case GGML_TYPE_F16:
+            if (src1->type == GGML_TYPE_F16) {
+                ggml_compute_forward_add_f16_f16(params, src0, src1, dst);
+            }
+            break;
+        ...
+    }
+}
+
+static void ggml_compute_forward_add_f16_f16(*params, *src0, *src1, *dst) {
+    const int ith = params->ith;
+    const int nth = params->nth;
+    const int nr  = ggml_nrows(src0);
+    const int ir0 = dr*ith;
+    const int ir1 = MIN(ir0 + dr, nr);
+    for (int ir = ir0; ir < ir1; ++ir) {
+        const int i3 = ir/(ne2*ne1);
+        const int i2 = (ir - i3*ne2*ne1)/ne1;
+        const int i1 = (ir - i3*ne2*ne1 - i2*ne1);
+        ggml_fp16_t *dst_ptr  = (ggml_fp16_t *) ((char *) dst->data  + i3*nb3  + i2*nb2  + i1*nb1);
+        ggml_fp16_t *src0_ptr = (ggml_fp16_t *) ((char *) src0->data + i3*nb03 + i2*nb02 + i1*nb01);
+        ggml_fp16_t *src1_ptr = (ggml_fp16_t *) ((char *) src1->data + i3*nb13 + i2*nb12 + i1*nb11);
+        for (int i = 0; i < ne0; i++) {
+            dst_ptr[i] = GGML_FP32_TO_FP16(GGML_FP16_TO_FP32(src0_ptr[i]) + GGML_FP16_TO_FP32(src1_ptr[i]));
+        }
+    }
+}
+
+
+typedef struct llama_batch {
+    int32_t n_tokens;
+    llama_token  *  token;     // int32_t
+    float        *  embd;
+    llama_pos    *  pos;       // int32_t
+    int32_t      *  n_seq_id;
+    llama_seq_id ** seq_id;    // int32_t
+    int8_t       *  logits;
+}
+

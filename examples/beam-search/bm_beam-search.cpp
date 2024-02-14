@@ -56,7 +56,7 @@ static void beam_search_callback(void * callback_data_ptr, llama_beams_state bea
 #if 1 // DEBUG: print current beams for this iteration
     std::cout << "\n\nCurrent beams (last_call=" << beams_state.last_call << "):\n";
     for (size_t i = 0 ; i < beams_state.n_beams ; ++i) {
-        std::cout << "beams[" << i << "]: " << ostream_beam_view{callback_data.ctx,beams_state.beam_views[i]} << std::endl;
+        std::cout << "beams["<<i<<"]: " << ostream_beam_view{callback_data.ctx,beams_state.beam_views[i]} << std::endl;
     }
 #endif
 }
@@ -92,16 +92,6 @@ int main(int argc, char ** argv) {
     const size_t max_context_size     = llama_n_ctx( ctx );
     const size_t max_tokens_list_size = max_context_size - 4 ;
 
-    //bm
-    std::cout << "\nmax_context_size = " << max_context_size << std::endl;
-    std::cout << "max_tokens_list_size = " << max_tokens_list_size << std::endl;
-    std::cout << "tokens_list.size() = " << tokens_list.size() << std::endl;
-    for(size_t i = 0; i < tokens_list.size(); ++i) {
-        std::cout << tokens_list[i] << " ";
-    }
-    std::cout << "\n";
-
-
     if (tokens_list.size() > max_tokens_list_size) {
         fprintf( stderr , "%s: error: prompt too long (%zu tokens, max %zu)\n" ,
              __func__ , tokens_list.size() , max_tokens_list_size );
@@ -122,29 +112,17 @@ int main(int argc, char ** argv) {
         return 1;
     }
     n_past += tokens_list.size();
-    //bm
-    std::cout << "n_past = " << n_past << std::endl;
-    for(size_t i = 0; i < tokens_list.size(); ++i) {
-        std::cout << tokens_list[i] << " ";
+
+    beam_search_callback_data callback_data{ctx, {}};
+    size_t const beam_width = static_cast<size_t>(params.n_beams);
+    int const n_predict = 256;
+    llama_beam_search(ctx, beam_search_callback, &callback_data, beam_width, n_past, n_predict);
+
+    std::cout << "\n\n";
+    for (llama_token const token_id : callback_data.response) {
+        std::cout << llama_token_to_piece(ctx,token_id);
     }
-    std::cout << "\n";
-
-    {
-        beam_search_callback_data callback_data{ctx, {}};
-        size_t const beam_width = static_cast<size_t>(params.n_beams);
-        int const n_predict = 256;
-
-        //计算量大
-        std::cout << "llama_beam_search\n";
-        llama_beam_search(ctx, beam_search_callback, &callback_data, beam_width, n_past, n_predict);
-        std::cout << "llama_beam_search done\n";
-
-        std::cout << "\n\n";
-        for (llama_token const token_id : callback_data.response) {
-            std::cout << llama_token_to_piece(ctx, token_id);
-        }
-        std::cout << std::endl;
-    }
+    std::cout << std::endl;
 
     llama_free( ctx );
     llama_free_model( model );

@@ -150,19 +150,19 @@ static double log_softmax(int n_vocab, const float * logits, uint16_t * log_prob
 }
 
 static void process_logits(
-        int n_vocab, const float *logits, const int *tokens, int n_token, std::vector<std::thread> &workers,
-        double &nll, double &nll2, float *logit_history, float *prob_history) {
+    int n_vocab, const float * logits, const int * tokens, int n_token, std::vector<std::thread> & workers,
+    double & nll, double & nll2, float * logit_history, float * prob_history
+) {
     std::mutex mutex;
     int counter = 0;
-    auto compute = [&mutex, &counter, &nll, &nll2, logit_history, prob_history, n_vocab, logits, tokens, n_token]() {
+    auto compute = [&mutex, &counter, &nll, &nll2, logit_history, prob_history, n_vocab, logits, tokens, n_token] () {
         double local_nll  = 0;
         double local_nll2 = 0;
         while (true) {
             std::unique_lock<std::mutex> lock(mutex);
             int i = counter++;
             if (i >= n_token) {
-                nll += local_nll; 
-                nll2 += local_nll2;
+                nll += local_nll; nll2 += local_nll2;
                 break;
             }
             lock.unlock();
@@ -170,21 +170,22 @@ static void process_logits(
             const double v = -results.log_softmax;
             local_nll += v;
             local_nll2 += v*v;
+
             logit_history[i] = results.logit;
             prob_history[i]  = results.prob;
         }
     };
-    for (auto &w : workers) {
+    for (auto & w : workers) {
         w = std::thread(compute);
     }
     compute();
-    for (auto &w : workers) {
+    for (auto & w : workers) {
         w.join();
     }
 }
 
 static void process_logits(std::ostream& out, int n_vocab, const float * logits, const int * tokens, int n_token,
-        std::vector<std::thread> &workers, std::vector<uint16_t> & log_probs, double & nll, double & nll2) {
+        std::vector<std::thread> & workers, std::vector<uint16_t> & log_probs, double & nll, double & nll2) {
     std::mutex mutex;
     const int nv = 2*((n_vocab + 1)/2) + 4;
     int counter = 0;
@@ -441,7 +442,6 @@ static results_perplexity perplexity_v2(llama_context * ctx, const gpt_params & 
     return {tokens, std::exp(nll / count), logit_history, prob_history};
 }
 
-
 static results_perplexity perplexity(llama_context * ctx, const gpt_params & params) {
     if (params.ppl_stride > 0) {
         return perplexity_v2(ctx, params);
@@ -475,20 +475,21 @@ static results_perplexity perplexity(llama_context * ctx, const gpt_params & par
     auto tim2 = std::chrono::high_resolution_clock::now();
     fprintf(stderr, "%s: tokenization took %g ms\n",__func__,1e-3*std::chrono::duration_cast<std::chrono::microseconds>(tim2-tim1).count());
 
-    std::cout << "tokens.size()= " << tokens.size() << ", 2*n_ctx= " << 2*n_ctx << std::endl;
-
     if (int(tokens.size()) < 2*n_ctx) {
-        fprintf(stderr, "%s: you need at least %d tokens to evaluate perplexity with a context of %d\n", __func__, 2*n_ctx, n_ctx);
-        fprintf(stderr, "%s: the data file you provided tokenizes to only %zu tokens\n", __func__, tokens.size());
+        fprintf(stderr, "%s: you need at least %d tokens to evaluate perplexity with a context of %d\n",__func__,2*n_ctx,
+                n_ctx);
+        fprintf(stderr, "%s: the data file you provided tokenizes to only %zu tokens\n",__func__,tokens.size());
         return {std::move(tokens), 0., {}, {}};
     }
 
     std::vector<float> logit_history;
     logit_history.resize(tokens.size());
+
     std::vector<float> prob_history;
     prob_history.resize(tokens.size());
 
     const int n_chunk_max = tokens.size() / n_ctx;
+
     const int n_chunk = params.n_chunks < 0 ? n_chunk_max : std::min(params.n_chunks, n_chunk_max);
     const int n_vocab = llama_n_vocab(llama_get_model(ctx));
     const int n_batch = params.n_batch;
@@ -520,7 +521,10 @@ static results_perplexity perplexity(llama_context * ctx, const gpt_params & par
     for (int i = 0; i < n_chunk; ++i) {
         const int start =     i * n_ctx;
         const int end   = start + n_ctx;
+
         const auto t_start = std::chrono::high_resolution_clock::now();
+
+        // clear the KV cache
         llama_kv_cache_clear(ctx);
 
         for (int j = 0; j < num_batches; ++j) {
@@ -544,7 +548,7 @@ static results_perplexity perplexity(llama_context * ctx, const gpt_params & par
             tokens[batch_start] = token_org;
 
             if (num_batches > 1) {
-                const auto *batch_logits = llama_get_logits(ctx);
+                const auto * batch_logits = llama_get_logits(ctx);
                 logits.insert(logits.end(), batch_logits, batch_logits + batch_size * n_vocab);
             }
         }
@@ -574,24 +578,20 @@ static results_perplexity perplexity(llama_context * ctx, const gpt_params & par
         // Example, we have a context window of 512, we will compute perplexity for each of the
         // last 256 tokens.  Then, we split the input up into context window size chunks to
         // process the entire prompt.
-        const int first = n_ctx / 2;
-        const float *all_logits = num_batches > 1 ? logits.data() : llama_get_logits(ctx);
-
+        const int first = n_ctx/2;
+        const float * all_logits = num_batches > 1 ? logits.data() : llama_get_logits(ctx);
         if (!params.logits_file.empty()) {
             process_logits(logits_stream, n_vocab, all_logits + first*n_vocab, tokens.data() + start + first, n_ctx - 1 - first,
                     workers, log_probs, nll, nll2);
         } else {
-            std::cout << "process_logits()\n";
             process_logits(n_vocab, all_logits + first*n_vocab, tokens.data() + start + first, n_ctx - 1 - first,
                     workers, nll, nll2, logit_history.data() + start + first, prob_history.data() + start + first);
-            std::cout << "process_logits() done\n";
         }
-
         count += n_ctx - first - 1;
 
         // perplexity is e^(average negative log-likelihood)
         if (params.ppl_output_type == 0) {
-            printf("[chunk %d] ppl=%.4lf, \n", i + 1, std::exp(nll / count));
+            printf("[%d]%.4lf,", i + 1, std::exp(nll / count));
         } else {
             double av = nll/count;
             double av2 = nll2/count - av*av;
@@ -617,7 +617,6 @@ static results_perplexity perplexity(llama_context * ctx, const gpt_params & par
 
     return {tokens, ppl, logit_history, prob_history};
 }
-
 
 static bool decode_helper(llama_context * ctx, llama_batch & batch, std::vector<float> & batch_logits, int32_t n_batch, int32_t n_vocab) {
     for (int32_t i = 0; i < (int32_t) batch.n_tokens; i += n_batch) {
@@ -1812,8 +1811,8 @@ int main(int argc, char ** argv) {
 
     llama_backend_init(params.numa);
 
-    llama_model *model;
-    llama_context *ctx;
+    llama_model * model;
+    llama_context * ctx;
 
     // load the model and apply lora adapter, if any
     std::tie(model, ctx) = llama_init_from_gpt_params(params);
@@ -1834,15 +1833,6 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "%s\n", get_system_info(params).c_str());
     }
 
-    std::cout << "params.hellaswag= " << params.hellaswag << std::endl;
-    std::cout << "params.winogrande= " << params.winogrande << std::endl;
-    std::cout << "params.multiple_choice= " << params.multiple_choice << std::endl;
-    std::cout << "params.kl_divergence= " << params.kl_divergence << std::endl;
-    std::cout << "params.ppl_stride= " << params.ppl_stride << std::endl;
-    std::cout << "params.logits_file= " << params.logits_file.c_str() << std::endl;
-    std::cout << "params.logits_file.empty()= " << params.logits_file.empty() << std::endl;
-
-
     struct results_perplexity results;
     if (params.hellaswag) {
         hellaswag_score(ctx, params);
@@ -1853,16 +1843,15 @@ int main(int argc, char ** argv) {
     } else if (params.kl_divergence) {
         kl_divergence(ctx, params);
     } else {
-        std::cout << "\nperplexity()\n";
         results = perplexity(ctx, params);
-        std::cout << "\nperplexity() done\n";
     }
 
     llama_print_timings(ctx);
-    // write_logfile(ctx, params, model, results);
+    write_logfile(ctx, params, model, results);
 
     llama_free(ctx);
     llama_free_model(model);
+
     llama_backend_free();
 
     return 0;
